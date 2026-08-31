@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Environment variables
+.env
+
+# IDEs & Editors
+.vscode/
+.idea/
+.antigravity/
+
+# Runtime Outputs
+output/*.md
+output/*.json
+uv.lock
+.langgraph_api/*.pckl
+.editorconfig
+.python-version

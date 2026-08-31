@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "graph": "./workflow.py:graph"
+  },
+  "env": "./.env"
+}
