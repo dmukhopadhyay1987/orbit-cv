@@ -3,7 +3,7 @@
     "."
   ],
   "graphs": {
-    "graph": "./workflow.py:graph"
+    "graph": "./src/orbit_cv/workflow.py:graph"
   },
   "env": "./.env"
 }

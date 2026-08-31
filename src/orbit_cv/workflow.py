@@ -1,9 +1,9 @@
 import os
 from typing import TypedDict, List, Optional, Any
 from langgraph.graph import StateGraph, END
-from intake_server import extract_text_from_file
-from analysis_engine import run_gap_analysis, GapAnalysisResult
-from agents import CVTailoringAgent, UpskillingAgent, TailoredOutput, UpskillingReport
+from orbit_cv.intake_server import extract_text_from_file
+from orbit_cv.analysis_engine import run_gap_analysis, GapAnalysisResult
+from orbit_cv.agents import CVTailoringAgent, UpskillingAgent, TailoredOutput, UpskillingReport
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
 from typing import TypedDict, List, Optional, Any, Annotated
