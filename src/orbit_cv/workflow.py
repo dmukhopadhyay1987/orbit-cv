@@ -302,8 +302,7 @@ def tailoring_node(state: OrbitCVState) -> dict:
     
     return {
         "tailored_cv": output.tailored_cv_markdown,
-        "cover_letter": output.cover_letter_markdown,
-        "messages": [AIMessage(content=response_text)]  # Feeds the Vercel frontend chat stream cleanly
+        "cover_letter": output.cover_letter_markdown
     }
 
 # --- Node 4: Tavily Upskilling Research ---
@@ -311,12 +310,37 @@ def upskilling_node(state: OrbitCVState) -> dict:
     print("\n🔍 [Graph] Step 4: Researching upskilling courses via Tavily API...")
     gap_analysis = state["gap_analysis"]
     skill_gaps = gap_analysis.skill_gaps if gap_analysis else []
-    
+
     agent = UpskillingAgent()
     report: UpskillingReport = agent.run(skill_gaps)
-    
+
+    recs_data = [rec.model_dump() if hasattr(rec, "model_dump") else rec for rec in report.recommendations]
+
+    # Build Markdown list to feed the Vercel frontend chat stream
+    if report.recommendations:
+        upskilling_md = "### 💡 Recommended Courses & Upskilling\n\n"
+        for rec in report.recommendations:
+            # Safely retrieve fields from Pydantic object or dict
+            title = getattr(rec, "title", None) or (rec.get("title") if isinstance(rec, dict) else "Course Link")
+            url = getattr(rec, "url", None) or (rec.get("url") if isinstance(rec, dict) else "#")
+            skill = getattr(rec, "skill", None) or (rec.get("skill") if isinstance(rec, dict) else "Target Skill")
+            description = getattr(rec, "description", None) or (rec.get("description") if isinstance(rec, dict) else "")
+
+            item_str = f"* **{skill}**: [{title}]({url})"
+            if description:
+                item_str += f" — *{description}*"
+            upskilling_md += f"{item_str}\n"
+    else:
+        upskilling_md = "### 💡 Recommended Courses & Upskilling\n\nNo additional courses required based on current alignment."
+
+    # Update metadata insights so frontend sidebars receive the parsed data
+    insights = state.get("agent_insights") or {}
+    insights["course_recommendations"] = recs_data
+
     return {
-        "course_recommendations": [rec.model_dump() for rec in report.recommendations]
+        "course_recommendations": recs_data,
+        "agent_insights": insights,
+        "messages": [AIMessage(content=upskilling_md)]
     }
 
 # --- Conditional Router ---
@@ -327,6 +351,23 @@ def should_upskill(state: OrbitCVState) -> str:
         return "upskill"
     print("   -> No significant skill gaps found. Skipping Tavily upskilling search.")
     return "skip_upskill"
+
+def format_final_output_node(state: OrbitCVState) -> dict:
+    cv_text = state.get("tailored_cv", "")
+    letter_text = state.get("cover_letter", "")
+    recs = state.get("course_recommendations", [])
+
+    combined_output = f"### Tailored CV\n\n{cv_text}\n\n---\n\n### Cover Letter\n\n{letter_text}"
+
+    if recs:
+        combined_output += "\n\n---\n\n### 💡 Skill Gap & Upskilling Recommendations\n\n"
+        for rec in recs:
+            title = rec.get("title", "Course Link")
+            url = rec.get("url", "#")
+            skill = rec.get("skill", "Skill")
+            combined_output += f"* **{skill}**: [{title}]({url})\n"
+
+    return {"messages": [AIMessage(content=combined_output)]}
 
 # --- Graph Compilation ---
 def create_orbitcv_graph():
@@ -339,7 +380,8 @@ def create_orbitcv_graph():
     workflow.add_node("tailor", tailoring_node)
     workflow.add_node("fact_check", fact_check_node)  # <-- Add node registration here
     workflow.add_node("upskill", upskilling_node)
-    
+    workflow.add_node("format_final_output", format_final_output_node)
+
     # 2. Wire Edges
     workflow.set_entry_point("intake")
     workflow.add_edge("intake", "clarify")
@@ -349,14 +391,15 @@ def create_orbitcv_graph():
     
     # 3. Route from fact_check into conditional upskilling
     workflow.add_conditional_edges(
-        "fact_check",                                 # <-- Route fact_check -> upskill/END
+        "fact_check",
         should_upskill,
         {
             "upskill": "upskill",
-            "skip_upskill": END
+            "skip_upskill": "format_final_output"
         }
     )
-    workflow.add_edge("upskill", END)
+    workflow.add_edge("upskill", "format_final_output")
+    workflow.add_edge("format_final_output", END)
     
     return workflow.compile()
     

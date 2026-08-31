@@ -86,7 +86,7 @@ class UpskillingAgent:
     def run(self, skill_gaps: List[str]) -> UpskillingReport:
         if not skill_gaps:
             return UpskillingReport(recommendations=[])
-        
+        unique_gaps = list(dict.fromkeys([g.strip() for g in skill_gaps if g.strip()]))
         # Execute targeted web searches for each skill gap using Tavily
         search_context = []
         for skill in skill_gaps:
