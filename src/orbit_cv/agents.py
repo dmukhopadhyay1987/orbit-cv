@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-5-nano")
+
+def get_llm(temperature: float = 0):
+    return ChatOpenAI(model=MODEL_NAME, temperature=temperature)
+
 # --- Schemas for Tailoring and Upskilling ---
 
 class TailoredOutput(BaseModel):
@@ -29,12 +34,26 @@ class UpskillingReport(BaseModel):
         description="List of targeted courses and certifications for the identified skill gaps."
     )
 
+class FactCheckResult(BaseModel):
+    hallucinated_claims: List[str] = Field(
+        description="List of skills, tools, certifications, or language claims found in the generated output that are NOT supported by the master CV."
+    )
+    cleaned_tailored_cv: str = Field(
+        description="The tailored CV text with all unverified claims, commentary, notes, and disclaimers completely removed."
+    )
+    cleaned_cover_letter: str = Field(
+        description="The cover letter text with all unverified claims and meta-commentary removed."
+    )
+    strategy_notes: str = Field(
+        description="Summary of adjustments made during tailoring (e.g. key keywords targeted, experience restructured) to display in the UI sidebar."
+    )
+
 # --- Agent Implementations ---
 
 class CVTailoringAgent:
     """Agent responsible for rewriting the CV and crafting a targeted cover letter."""
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-5-nano", temperature=0.2)
+        self.llm = get_llm(0.2)
 
     def run(self, raw_cv: str, jd_text: str, gap_analysis: Any) -> TailoredOutput:
         prompt = f"""
@@ -60,7 +79,7 @@ class CVTailoringAgent:
 class UpskillingAgent:
     """Agent responsible for searching real-time learning resources via Tavily for identified skill gaps."""
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-5-nano", temperature=0.1)
+        self.llm = get_llm(0.1)
         # Initialize Tavily search tool via langchain-tavily
         self.search_tool = TavilySearch(max_results=3, topic="general", search_depth="basic")
 

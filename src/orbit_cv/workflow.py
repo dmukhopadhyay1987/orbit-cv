@@ -1,28 +1,129 @@
 import os
-from typing import TypedDict, List, Optional, Any
-from langgraph.graph import StateGraph, END
-from orbit_cv.intake_server import extract_text_from_file
-from orbit_cv.analysis_engine import run_gap_analysis, GapAnalysisResult
-from orbit_cv.agents import CVTailoringAgent, UpskillingAgent, TailoredOutput, UpskillingReport
-from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
+import ast
+import json
+import base64
+import io
 from typing import TypedDict, List, Optional, Any, Annotated
 from langgraph.graph import StateGraph, END, add_messages
+from orbit_cv.intake_server import extract_text_from_file
+from orbit_cv.analysis_engine import run_gap_analysis, GapAnalysisResult
+from orbit_cv.agents import get_llm, CVTailoringAgent, UpskillingAgent, TailoredOutput, UpskillingReport, FactCheckResult
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, HumanMessage
+
+def parse_content_item(content) -> tuple[list[dict], str]:
+    """
+    Parses content (which could be a string, a list of dicts, or a stringified list of dicts)
+    and returns a list of files (with decoded base64 data) and a concatenated text string.
+    """
+    files = []
+    texts = []
+
+    if isinstance(content, str):
+        content_stripped = content.strip()
+        if (content_stripped.startswith("[") and content_stripped.endswith("]")) or \
+           (content_stripped.startswith("{") and content_stripped.endswith("}")):
+            try:
+                parsed = json.loads(content_stripped)
+                content = parsed
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(content_stripped)
+                    content = parsed
+                except Exception:
+                    pass
+
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "text":
+                    texts.append(item.get("text", ""))
+                elif item_type == "file":
+                    mime_type = item.get("mimeType", "")
+                    base64_data = item.get("data", "")
+                    if base64_data:
+                        try:
+                            decoded = base64.b64decode(base64_data)
+                            files.append({"mimeType": mime_type, "data": decoded})
+                        except Exception as e:
+                            print(f"Error decoding base64 file data: {e}")
+                elif "image_url" in item:
+                    pass
+            elif isinstance(item, str):
+                texts.append(item)
+    elif isinstance(content, dict):
+        item_type = content.get("type")
+        if item_type == "text":
+            texts.append(content.get("text", ""))
+        elif item_type == "file":
+            mime_type = content.get("mimeType", "")
+            base64_data = content.get("data", "")
+            if base64_data:
+                try:
+                    decoded = base64.b64decode(base64_data)
+                    files.append({"mimeType": mime_type, "data": decoded})
+                except Exception as e:
+                    print(f"Error decoding base64 file data: {e}")
+    elif isinstance(content, str):
+        texts.append(content)
+
+    return files, "\n".join(texts)
+
+def extract_text_from_bytes(data: bytes, mime_type: str) -> str:
+    """Extracts raw text from bytes based on mimeType."""
+    if mime_type == "application/pdf":
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(data))
+        return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+    elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        import docx
+        doc = docx.Document(io.BytesIO(data))
+        return "\n".join([para.text for para in doc.paragraphs if para.text])
+    elif "text/" in mime_type or mime_type in ["application/json", "application/javascript"]:
+        return data.decode("utf-8", errors="ignore")
+    else:
+        try:
+            return data.decode("utf-8")
+        except Exception:
+            raise ValueError(f"Unsupported mimeType: {mime_type}")
+
+def extract_jd_from_text(text: str) -> str | None:
+    """Attempts to find and extract the job description from the message text."""
+    lower_text = text.lower()
+    markers = [
+        "here is the job description:",
+        "here is the job description",
+        "job description:",
+        "job description",
+        "about the job:",
+        "about the job",
+        "target role:",
+        "target role"
+    ]
+    
+    for marker in markers:
+        idx = lower_text.find(marker)
+        if idx != -1:
+            jd_part = text[idx + len(marker):].strip()
+            if len(jd_part) > 20:
+                return jd_part
+    return None
 
 # --- Custom Python State supporting messages and custom keys ---
 class OrbitCVState(TypedDict):
-    messages: Annotated[list, add_messages]  # Enables safe chat history for Vercel UI
+    messages: Annotated[list, add_messages]
     cv_path: str
     jd_input: str
     parsed_cv: Optional[dict]
     parsed_jd: Optional[dict]
     gap_analysis: Optional[Any]
-    tailored_cv: Optional[str]
-    cover_letter: Optional[str]
+    tailored_cv: Optional[str]          # Pure document text ONLY
+    cover_letter: Optional[str]        # Pure document text ONLY
+    unverified_claims: Optional[List[str]]
+    agent_insights: Optional[dict]     # Structural metadata for UI panels
     course_recommendations: Optional[list]
-
-import os
 
 # --- Node 1: Document Intake (With State Inspection) ---
 def intake_node(state: OrbitCVState) -> dict:
@@ -44,30 +145,60 @@ def intake_node(state: OrbitCVState) -> dict:
 
     # Determine CV source: check state keys or fallback to message text
     cv_input = state.get("cv_path") or latest_text or "Sample full-stack developer profile with 15 years of experience in Java, Kotlin, and MongoDB."
-    jd_input = state.get("jd_input") or "Looking for a full-stack developer."
-
+    
     # Parse CV text safely
     parsed_cv = {}
-    if os.path.exists(str(cv_input)):
+    extracted_text_from_prompt = ""
+    
+    if isinstance(cv_input, str) and os.path.exists(cv_input):
         try:
             cv_text = extract_text_from_file(cv_input)
+            print(f"   -> Extracted CV Text Length: {len(cv_text)}")
             parsed_cv = {"source_file": cv_input, "raw_text": cv_text, "status": "success"}
         except Exception as e:
             parsed_cv = {"source_file": cv_input, "raw_text": str(cv_input), "status": "success"}
     else:
-        # Treat whatever text was typed or uploaded as the raw resume text directly
-        parsed_cv = {"source_file": "chat_upload_or_text", "raw_text": str(cv_input), "status": "success"}
+        # Parse it as content (possibly multipart with files/prompt text)
+        files, prompt_text = parse_content_item(cv_input)
+        extracted_text_from_prompt = prompt_text
+        
+        if files:
+            cv_texts = []
+            for f in files:
+                try:
+                    cv_text = extract_text_from_bytes(f["data"], f["mimeType"])
+                    cv_texts.append(cv_text)
+                except Exception as e:
+                    print(f"   -> Error extracting text from uploaded file: {e}")
+            if cv_texts:
+                combined_cv = "\n\n".join(cv_texts)
+                print(f"   -> Extracted CV Text Length from uploaded files: {len(combined_cv)}")
+                parsed_cv = {"source_file": "chat_upload_files", "raw_text": combined_cv, "status": "success"}
+            else:
+                parsed_cv = {"source_file": "chat_upload_or_text", "raw_text": prompt_text, "status": "success"}
+        else:
+            parsed_cv = {"source_file": "chat_upload_or_text", "raw_text": prompt_text, "status": "success"}
 
     # Parse JD text safely
     parsed_jd = {}
-    if os.path.exists(str(jd_input)):
-        try:
-            jd_text = extract_text_from_file(jd_input)
-            parsed_jd = {"source": jd_input, "raw_text": jd_text, "status": "success"}
-        except Exception as e:
-            parsed_jd = {"source": jd_input, "raw_text": str(jd_input), "status": "success"}
-    else:
-        parsed_jd = {"source": "direct_input", "raw_text": str(jd_input), "status": "success"}
+    jd_input = state.get("jd_input")
+    
+    if not jd_input and extracted_text_from_prompt:
+        extracted_jd = extract_jd_from_text(extracted_text_from_prompt)
+        if extracted_jd:
+            print(f"   -> Extracted Job Description from chat prompt, length: {len(extracted_jd)}")
+            parsed_jd = {"source": "extracted_from_prompt", "raw_text": extracted_jd, "status": "success"}
+            
+    if not parsed_jd:
+        jd_input = jd_input or "Looking for a full-stack developer."
+        if isinstance(jd_input, str) and os.path.exists(jd_input):
+            try:
+                jd_text = extract_text_from_file(jd_input)
+                parsed_jd = {"source": jd_input, "raw_text": jd_text, "status": "success"}
+            except Exception as e:
+                parsed_jd = {"source": jd_input, "raw_text": str(jd_input), "status": "success"}
+        else:
+            parsed_jd = {"source": "direct_input", "raw_text": str(jd_input), "status": "success"}
 
     return {"parsed_cv": parsed_cv, "parsed_jd": parsed_jd}
 
@@ -111,6 +242,51 @@ def analysis_node(state: OrbitCVState) -> dict:
     print(f"   -> Alignment Score: {gap_result.alignment_score}%")
     print(f"   -> Identified Skill Gaps: {gap_result.skill_gaps}")
     return {"gap_analysis": gap_result}
+
+def fact_check_node(state: OrbitCVState) -> dict:
+    print("\n🛡️ [Graph] Fact-Checking: Auditing generated output against Master CV...")
+    
+    master_cv_text = state.get("parsed_cv", {}).get("raw_text", "")
+    generated_cv = state.get("tailored_cv", "")
+    generated_letter = state.get("cover_letter", "")
+    
+    if not generated_cv or not master_cv_text:
+        return {}
+
+    llm = get_llm(temperature=0).with_structured_output(FactCheckResult)
+    
+    prompt = f"""
+    You are an automated compliance editor for executive resume tailoring.
+    
+    MASTER CV (Source of Truth):
+    {master_cv_text}
+    
+    GENERATED TAILORED CV:
+    {generated_cv}
+    
+    GENERATED COVER LETTER:
+    {generated_letter}
+    
+    Your Task:
+    1. Compare the generated CV and cover letter against the Master CV.
+    2. Remove any claims not supported by the Master CV.
+    3. Strip out ALL non-document content (e.g., '> Let op:', notes, footnotes, disclaimers) from the final document strings.
+    4. Provide a 2-3 sentence strategic rationale in 'strategy_notes' explaining how the resume was aligned to the job description.
+    """
+    
+    audit_result: FactCheckResult = llm.invoke(prompt)
+    
+    # Clean separation: Documents remain pure; insights move to metadata
+    return {
+        "tailored_cv": audit_result.cleaned_tailored_cv,
+        "cover_letter": audit_result.cleaned_cover_letter,
+        "unverified_claims": audit_result.hallucinated_claims,
+        "agent_insights": {
+            "strategy_notes": audit_result.strategy_notes,
+            "removed_claims_count": len(audit_result.hallucinated_claims),
+            "flagged_claims": audit_result.hallucinated_claims
+        }
+    }
 
 # --- Node 3: CV Tailoring & Branding ---
 def tailoring_node(state: OrbitCVState) -> dict:
@@ -156,21 +332,24 @@ def should_upskill(state: OrbitCVState) -> str:
 def create_orbitcv_graph():
     workflow = StateGraph(OrbitCVState)
     
-    # Add Nodes
+    # 1. Add Nodes
     workflow.add_node("intake", intake_node)
     workflow.add_node("clarify", clarification_node)
     workflow.add_node("analyze", analysis_node)
     workflow.add_node("tailor", tailoring_node)
+    workflow.add_node("fact_check", fact_check_node)  # <-- Add node registration here
     workflow.add_node("upskill", upskilling_node)
     
-    # Define Edges & Flow
+    # 2. Wire Edges
     workflow.set_entry_point("intake")
     workflow.add_edge("intake", "clarify")
     workflow.add_edge("clarify", "analyze")
     workflow.add_edge("analyze", "tailor")
+    workflow.add_edge("tailor", "fact_check")         # <-- Route tailor -> fact_check
     
+    # 3. Route from fact_check into conditional upskilling
     workflow.add_conditional_edges(
-        "tailor",
+        "fact_check",                                 # <-- Route fact_check -> upskill/END
         should_upskill,
         {
             "upskill": "upskill",
@@ -179,7 +358,6 @@ def create_orbitcv_graph():
     )
     workflow.add_edge("upskill", END)
     
-    # Compile cleanly without a custom checkpointer (LangGraph API handles this automatically)
     return workflow.compile()
     
 # Compile the graph and expose it as a global variable for the LangGraph dev server

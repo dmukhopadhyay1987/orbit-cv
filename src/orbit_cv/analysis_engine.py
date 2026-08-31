@@ -1,8 +1,8 @@
 import os
 from pydantic import BaseModel, Field
 from typing import List
-from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
+from orbit_cv.agents import get_llm
 
 # Load environment variables
 load_dotenv()
@@ -30,10 +30,7 @@ def run_gap_analysis(parsed_cv: dict, parsed_jd: dict) -> GapAnalysisResult:
     modeled around RLM context processing.
     """
     # Initialize the cost-effective gpt-5-nano model optimized for low-latency reasoning
-    llm = ChatOpenAI(
-        model="gpt-5-nano",
-        temperature=0.1
-    )
+    llm = get_llm(0.1)
     
     # Construct the analysis prompt incorporating raw texts from the FastMCP intake phase
     prompt = f"""
