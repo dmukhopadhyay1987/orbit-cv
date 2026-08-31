@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
@@ -77,41 +78,56 @@ class CVTailoringAgent:
         return structured_llm.invoke(prompt)
 
 class UpskillingAgent:
-    """Agent responsible for searching real-time learning resources via Tavily for identified skill gaps."""
-    def __init__(self):
-        self.llm = get_llm(0.1)
-        # Initialize Tavily search tool via langchain-tavily
-        self.search_tool = TavilySearch(max_results=3, topic="general", search_depth="basic")
+    def __init__(self, tavily_client=None):
+        # Initialize your Tavily client here if not already done
+        self.client = tavily_client
 
-    def run(self, skill_gaps: List[str]) -> UpskillingReport:
-        if not skill_gaps:
-            return UpskillingReport(recommendations=[])
+    def _sanitize_title(self, raw_title: str, skill: str) -> str:
+        """Fixes generic Tavily titles like 'Course Link' or empty titles."""
+        if not raw_title or raw_title.lower().strip() in ["course link", "home", "search", "index"]:
+            return f"{skill} Training / Certification"
+        return raw_title.strip()
+
+    def _search_single_gap(self, skill: str) -> list[dict]:
+        """Queries Tavily for a single skill gap and cleans the output."""
+        query = f"best online course certification for {skill}"
+        recs = []
+        
+        try:
+            # Replace with your actual Tavily search API call logic
+            response = self.client.search(query=query, max_results=2)
+            results = response.get("results", [])
+            
+            for res in results:
+                raw_url = res.get("url", "#")
+                raw_title = res.get("title", "")
+                
+                recs.append({
+                    "skill": skill,
+                    "title": self._sanitize_title(raw_title, skill),
+                    "url": raw_url,
+                    "description": res.get("snippet", "")[:150]
+                })
+        except Exception as e:
+            print(f"⚠️ Error searching for gap '{skill}': {e}")
+            
+        return recs
+
+    def run(self, skill_gaps: list[str]) -> UpskillingReport:
+        # Deduplicate skill inputs
         unique_gaps = list(dict.fromkeys([g.strip() for g in skill_gaps if g.strip()]))
-        # Execute targeted web searches for each skill gap using Tavily
-        search_context = []
-        for skill in skill_gaps:
-            query = f"best current online courses certifications for learning {skill}"
-            try:
-                results = self.search_tool.invoke({"query": query})
-                search_context.append(f"Skill: {skill}\nSearch Results: {results}")
-            except Exception as e:
-                search_context.append(f"Skill: {skill}\nSearch failed: {str(e)}")
+        if not unique_gaps:
+            return UpskillingReport(recommendations=[])
 
-        context_str = "\n\n".join(search_context)
+        all_recs = []
+        # Execute Tavily API calls in parallel across multiple worker threads
+        max_workers = min(len(unique_gaps), 5)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(self._search_single_gap, unique_gaps)
+            for res in results:
+                all_recs.extend(res)
 
-        prompt = f"""
-        You are an expert technical career mentor. Based on the web search results for the user's identified skill gaps,
-        synthesize a structured list of top recommendations for online courses or certifications.
-        
-        --- IDENTIFIED SKILL GAPS ---
-        {skill_gaps}
-        
-        --- WEB SEARCH RESULTS ---
-        {context_str}
-        """
-        
-        structured_llm = self.llm.with_structured_output(UpskillingReport)
-        return structured_llm.invoke(prompt)
+        return UpskillingReport(recommendations=all_recs)
 
 if __name__ == "__main__":
     print("Phase 4 agents module loaded successfully.")

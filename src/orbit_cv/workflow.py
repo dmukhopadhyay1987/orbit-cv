@@ -111,6 +111,30 @@ def extract_jd_from_text(text: str) -> str | None:
                 return jd_part
     return None
 
+def _search_single_gap(self, skill: str) -> list[dict]:
+    query = f"best online course certification for {skill}"
+    recs = []
+    
+    try:
+        # Set max_results to 1 to prevent returning multiple links per skill
+        response = self.client.search(query=query, max_results=1)
+        results = response.get("results", [])
+        
+        for res in results:
+            raw_url = res.get("url", "#")
+            raw_title = res.get("title", "")
+            
+            recs.append({
+                "skill": skill,
+                "title": self._sanitize_title(raw_title, skill),
+                "url": raw_url,
+                "description": res.get("snippet", "")[:150]
+            })
+    except Exception as e:
+        print(f"⚠️ Error searching for gap '{skill}': {e}")
+        
+    return recs
+
 # --- Custom Python State supporting messages and custom keys ---
 class OrbitCVState(TypedDict):
     messages: Annotated[list, add_messages]
@@ -308,23 +332,43 @@ def tailoring_node(state: OrbitCVState) -> dict:
 # --- Node 4: Tavily Upskilling Research ---
 def upskilling_node(state: OrbitCVState) -> dict:
     print("\n🔍 [Graph] Step 4: Researching upskilling courses via Tavily API...")
-    gap_analysis = state["gap_analysis"]
-    skill_gaps = gap_analysis.skill_gaps if gap_analysis else []
+    gap_analysis = state.get("gap_analysis")
+    raw_gaps = gap_analysis.skill_gaps if gap_analysis else []
 
     agent = UpskillingAgent()
-    report: UpskillingReport = agent.run(skill_gaps)
+    report: UpskillingReport = agent.run(raw_gaps)
 
     recs_data = [rec.model_dump() if hasattr(rec, "model_dump") else rec for rec in report.recommendations]
 
-    # Build Markdown list to feed the Vercel frontend chat stream
-    if report.recommendations:
+    BLOCKED_DOMAINS = ["reddit.com", "quora.com", "stackoverflow.com"]
+
+    seen_skills = set()
+    unique_recs = []
+
+    for rec in recs_data:
+        skill = rec.get("skill", "").strip()
+        url = rec.get("url", "").strip()
+        
+        # Normalize skill string for case-insensitive matching
+        skill_key = skill.lower()
+
+        # Skip blocked domains
+        if any(domain in url.lower() for domain in BLOCKED_DOMAINS):
+            continue
+
+        # Enforce exactly one course recommendation per unique skill gap
+        if skill_key and skill_key not in seen_skills:
+            seen_skills.add(skill_key)
+            unique_recs.append(rec)
+
+    # Build formatted Markdown stream output
+    if unique_recs:
         upskilling_md = "### 💡 Recommended Courses & Upskilling\n\n"
-        for rec in report.recommendations:
-            # Safely retrieve fields from Pydantic object or dict
-            title = getattr(rec, "title", None) or (rec.get("title") if isinstance(rec, dict) else "Course Link")
-            url = getattr(rec, "url", None) or (rec.get("url") if isinstance(rec, dict) else "#")
-            skill = getattr(rec, "skill", None) or (rec.get("skill") if isinstance(rec, dict) else "Target Skill")
-            description = getattr(rec, "description", None) or (rec.get("description") if isinstance(rec, dict) else "")
+        for rec in unique_recs:
+            skill = rec.get("skill", "Target Skill")
+            title = rec.get("title", "Course Link")
+            url = rec.get("url", "#")
+            description = rec.get("description", "")
 
             item_str = f"* **{skill}**: [{title}]({url})"
             if description:
@@ -333,12 +377,11 @@ def upskilling_node(state: OrbitCVState) -> dict:
     else:
         upskilling_md = "### 💡 Recommended Courses & Upskilling\n\nNo additional courses required based on current alignment."
 
-    # Update metadata insights so frontend sidebars receive the parsed data
     insights = state.get("agent_insights") or {}
-    insights["course_recommendations"] = recs_data
+    insights["course_recommendations"] = unique_recs
 
     return {
-        "course_recommendations": recs_data,
+        "course_recommendations": unique_recs,
         "agent_insights": insights,
         "messages": [AIMessage(content=upskilling_md)]
     }
