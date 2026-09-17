@@ -1,4 +1,4 @@
-# tools/doc_exporter.py
+# src/orbit_cv/tools/doc_exporter.py
 import re
 from pathlib import Path
 from typing import Literal
@@ -7,8 +7,8 @@ from fpdf import FPDF
 from fpdf.errors import FPDFException
 from langchain_core.tools import tool
 
-EXPORT_DIR = Path("/exports")
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+from orbit_cv.paths import EXPORTS_DIR, resolve_path
+
 
 def _sanitize_utf8_for_pdf(text: str) -> str:
     """Replaces Unicode characters outside latin-1 (em-dashes, smart quotes, bullet symbols)
@@ -77,15 +77,18 @@ def export_document(
     print(f"tool call [export_document] - content_markdown length: {len(content_markdown)}")
     safe_prefix = _sanitize_filename(filename_prefix)
 
+    # Ensure output target directory exists in data/exports
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
     # 1. Export Markdown
     if output_format == "md":
-        out_path = EXPORT_DIR / f"{safe_prefix}.md"
+        out_path = resolve_path(f"{safe_prefix}.md", default_route="exports")
         out_path.write_text(content_markdown, encoding="utf-8")
         return str(out_path.resolve())
 
     # 2. Export DOCX
     elif output_format == "docx":
-        out_path = EXPORT_DIR / f"{safe_prefix}.docx"
+        out_path = resolve_path(f"{safe_prefix}.docx", default_route="exports")
         doc = Document()
 
         for line in content_markdown.split("\n"):
@@ -111,9 +114,9 @@ def export_document(
 
     # 3. Export PDF
     elif output_format == "pdf":
-        out_path = EXPORT_DIR / f"{safe_prefix}.pdf"
+        out_path = resolve_path(f"{safe_prefix}.pdf", default_route="exports")
         pdf = CleanPDF(format="A4", unit="mm")
-        
+
         # Explicit margins ensure effective printable width is always bounded (~190mm)
         pdf.set_margins(left=10, top=10, right=10)
         pdf.set_auto_page_break(auto=True, margin=15)

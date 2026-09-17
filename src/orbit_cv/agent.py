@@ -1,5 +1,4 @@
 # src/orbit_cv/agent.py
-from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from deepagents import create_deep_agent
@@ -9,33 +8,37 @@ from orbit_cv.model import model
 from orbit_cv.subagents_config import SUBAGENTS
 from orbit_cv.middleware.rlm_context import RLMContextMiddleware
 from orbit_cv.middleware.todo_tracker import TodoTrackerMiddleware
+from orbit_cv.paths import (
+    SRC_DIR,
+    EXPORTS_DIR,
+    RESUMES_DIR,
+    CONTEXT_DIR,
+    HISTORY_DIR,
+    CONVERSATION_HISTORY_DIR,
+    ensure_data_directories
+)
 
-# Explicitly load environment variables
+# Load environment variables
 load_dotenv(find_dotenv())
 
-# Define absolute base directory relative to this file
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # Resolves to project root
-DATA_DIR = BASE_DIR / "data"
+# Guarantee directory structure exists
+ensure_data_directories()
 
-# Ensure runtime directories exist
-for folder in ["exports", "resumes", "context", "history", "conversation_history"]:
-    (DATA_DIR / folder).mkdir(parents=True, exist_ok=True)
-
-# Read system instructions deterministically
-AGENTS_MD_PATH = BASE_DIR / "src" / "orbit_cv" / "AGENTS.md"
+# Read system prompt
+AGENTS_MD_PATH = SRC_DIR / "AGENTS.md"
 system_instructions = AGENTS_MD_PATH.read_text(encoding="utf-8")
 
 model.profile = {**model.profile, "max_input_tokens": 700}
 
-# Absolute-path Composite Backend
+# Composite Backend mapped via path utility constants
 backend = CompositeBackend(
     default=StateBackend(),
     routes={
-        "/exports": FilesystemBackend(root_dir=str(DATA_DIR / "exports")),
-        "/resumes": FilesystemBackend(root_dir=str(DATA_DIR / "resumes")),
-        "/context": FilesystemBackend(root_dir=str(DATA_DIR / "context")),
-        "/history": FilesystemBackend(root_dir=str(DATA_DIR / "history")),
-        "/conversation_history": FilesystemBackend(root_dir=str(DATA_DIR / "conversation_history")),
+        "/exports": FilesystemBackend(root_dir=str(EXPORTS_DIR)),
+        "/resumes": FilesystemBackend(root_dir=str(RESUMES_DIR)),
+        "/context": FilesystemBackend(root_dir=str(CONTEXT_DIR)),
+        "/history": FilesystemBackend(root_dir=str(HISTORY_DIR)),
+        "/conversation_history": FilesystemBackend(root_dir=str(CONVERSATION_HISTORY_DIR)),
     }
 )
 

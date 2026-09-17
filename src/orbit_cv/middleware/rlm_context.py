@@ -1,19 +1,19 @@
-# middleware/rlm_context.py
+# src/orbit_cv/middleware/rlm_context.py
 import asyncio
 import base64
 import io
 import os
 import re
 import traceback
-from pathlib import Path
 from docx import Document
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from pypdf import PdfReader
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESUME_DIR = PROJECT_ROOT / "data" / "resumes"
-CANONICAL_CV_PATH = RESUME_DIR / "candidate_cv.txt"
+from orbit_cv.paths import RESUMES_DIR, resolve_path
+
+# Canonical path resolved through central path utility
+CANONICAL_CV_PATH = resolve_path("candidate_cv.txt", default_route="resumes")
 
 
 def _clean_and_decode_b64(b64_str: str) -> bytes:
@@ -57,9 +57,9 @@ def _extract_text_from_bytes(file_bytes: bytes, filename: str = "") -> str:
 
 
 def _sync_write_file(text: str) -> bool:
-    """Synchronous worker function that executes filesystem operations on a background thread."""
+    """Synchronous worker function executing filesystem operations on a background thread."""
     try:
-        RESUME_DIR.mkdir(parents=True, exist_ok=True)
+        RESUMES_DIR.mkdir(parents=True, exist_ok=True)
         with open(CANONICAL_CV_PATH, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
@@ -95,7 +95,7 @@ class RLMContextMiddleware(AgentMiddleware):
                 new_content = []
                 for block in msg.content:
                     if isinstance(block, dict):
-                        # Extract any potential file/base64 payload field
+                        # Extract potential file/base64 payload fields
                         data_candidates = [
                             block.get("data"),
                             block.get("url"),
@@ -114,13 +114,13 @@ class RLMContextMiddleware(AgentMiddleware):
                             payload.startswith("data:")
                             or payload.startswith("JVBERi")
                             or payload.startswith("UEsDB")
-                            or len(payload) > 200  # High probability of raw Base64 payload
+                            or len(payload) > 200  # High probability of Base64 payload
                         ):
                             try:
                                 file_bytes = _clean_and_decode_b64(payload)
                                 extracted_text = _extract_text_from_bytes(file_bytes, filename)
 
-                                # Execute non-blocking disk write in thread pool
+                                # Execute thread-offloaded disk write
                                 written = await _save_extracted_text_to_disk_async(extracted_text)
 
                                 if written and CANONICAL_CV_PATH.exists():
@@ -152,17 +152,23 @@ class RLMContextMiddleware(AgentMiddleware):
         return request
 
     def wrap_model_call(self, request, handler):
-        # Sync fallback for thread-bound contexts
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If already on event loop, run thread-offloaded write directly via loop run_in_executor or thread
-            request = loop.run_until_complete(self._sanitize_request_messages_async(request))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Create sub-task if already executing on an active event loop
+            future = asyncio.run_coroutine_threadsafe(
+                self._sanitize_request_messages_async(request), loop
+            )
+            request = future.result()
         else:
             request = asyncio.run(self._sanitize_request_messages_async(request))
+
         return handler(request)
 
     async def awrap_model_call(self, request, handler):
-        # Async flow called directly by LangGraph async runner
         request = await self._sanitize_request_messages_async(request)
         return await handler(request)
 
