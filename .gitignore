@@ -16,9 +16,10 @@ build/
 .antigravity/
 
 # Runtime Outputs
-output/*.md
-output/*.json
 uv.lock
 .langgraph_api/*.pckl
 .editorconfig
 .python-version
+data/
+exports/
+.langgraph_api/
